@@ -60,41 +60,60 @@ plt.tight_layout()
 plt.savefig("density.png", dpi=150)
 plt.show()
 
+def pearson_test(v, dist, fit_kwargs=None, k=None):
+    fit_kwargs = fit_kwargs or {}
+    k = k or k_sturges
+    params = dist.fit(v, **fit_kwargs)
+
+    # Равновероятные интервалы по квантилям проверяемого распределения:
+    # ожидаемая частота в каждом n/k, условие >= 5 выполняется автоматически
+    edges = dist.ppf(np.linspace(0, 1, k + 1), *params)
+    edges = np.unique(edges)          # защита от совпадающих границ
+    edges[0], edges[-1] = -np.inf, np.inf
+
+    obs, _ = np.histogram(v, bins=edges)
+    exp = np.diff(dist.cdf(edges, *params)) * len(v)
+
+    # Интервалы с ожидаемой частотой < 5 ОБЪЕДИНЯЕМ с соседними (не удаляем)
+    o, e = [obs[0]], [exp[0]]
+    for oi, ei in zip(obs[1:], exp[1:]):
+        if ei < 5:
+            o[-1] += oi
+            e[-1] += ei
+        else:
+            o.append(oi)
+            e.append(ei)
+    o, e = np.array(o), np.array(e)
+    k_used = len(o)
+
+    # m — число оценённых по выборке параметров распределения
+    m = len(params) - (1 if "floc" in fit_kwargs else 0)
+    df = k_used - 1 - m
+    if df < 1:
+        return np.nan, np.nan, k_used, df, params
+    chi2, p = stats.chisquare(o, e, ddof=m)   # ddof = m: поправка за оценённые параметры
+    return chi2, p, k_used, df, params
+
 # --- Проверка гипотезы о характере распределения (хи-квадрат Пирсона) ---
-# Гипотеза H0: выборка распределена по выбранному закону.
-# По форме гистограммы (скошенность вправо) проверяем кандидатов:
+# Число интервалов по правилу Стёрджеса
+k_sturges = int(np.ceil(1 + np.log2(len(v))))
 candidates = {
-    "нормальное":        stats.norm,
-    "логнормальное":     stats.lognorm,
-    "экспоненциальное":  stats.expon,
+    "нормальное":       (stats.norm,    {}),
+    "логнормальное":    (stats.lognorm, {"floc": 0}),
+    "экспоненциальное": (stats.expon,   {"floc": 0}),
 }
 
-# Группируем данные по интервалам
-n_bins = 8
-observed, edges = np.histogram(v, bins=n_bins)
-
-print("Проверка гипотезы по критерию хи-квадрат:")
-best_name, best_stat, best_p = None, np.inf, None
-for name, dist in candidates.items():
-    # Оцениваем параметры распределения по данным
-    params = dist.fit(v)
-    # Ожидаемые частоты: площадь плотности на каждом интервале * объём выборки
-    cdf = dist.cdf(edges, *params)
-    expected = np.diff(cdf) * len(v)
-
-    # Убираем интервалы с ожидаемой частотой < 5 (условие применимости критерия)
-    mask = expected >= 5
-    obs_m = observed[mask]
-    exp_m = expected[mask]
-
-    # Нормируем ожидаемые частоты, чтобы их сумма совпадала с наблюдаемой
-    exp_m = exp_m * obs_m.sum() / exp_m.sum()
-
-    chi_stat, p_value = stats.chisquare(obs_m, exp_m)
-    print(f"  {name:20s} chi2 = {chi_stat:10.2f}, p-value = {p_value:.4f} "
-          f"(интервалов использовано: {mask.sum()})")
-    if chi_stat < best_stat:
-        best_name, best_stat, best_p = name, chi_stat, p_value
+print(f"Проверка гипотезы по критерию хи-квадрат "
+      f"(k = {k_sturges} интервалов по правилу Стёрджеса):")
+best_name, best_stat, best_p = None, np.inf, -np.inf
+results = []
+for name, (dist, kw) in candidates.items():
+    chi2, p, k_used, dfree, params = pearson_test(v, dist, kw)
+    results.append((name, chi2, p, k_used, dfree))
+    print(f"  {name:20s} chi2 = {chi2:10.2f}, p-value = {p:.4f}, "
+        f"df = {dfree} (интервалов использовано: {k_used})")
+    if not np.isnan(p) and p > best_p:      # лучший кандидат — по максимальному p-value
+        best_name, best_stat, best_p = name, chi2, p
 
 # Вывод: если p-value > 0.05, гипотеза о распределении не отвергается
 print(f"\nЛучший кандидат: {best_name} (chi2 = {best_stat:.2f}, p-value = {best_p:.4f})")
